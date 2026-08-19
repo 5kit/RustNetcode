@@ -1,0 +1,22 @@
+# Rust
+/target/
+
+# RustRover / IntelliJ
+.idea/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Environment / secrets
+.env
+.env.*
+
+# Logs
+*.log
