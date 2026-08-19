@@ -6,43 +6,13 @@ use std::{
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
-#[derive(Debug)]
-pub struct PoolCreationError;
-
-pub struct ThreadPool {
-    pub size: usize,
-    workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
-}
-
 impl ThreadPool {
     /// Create a new ThreadPool.
     /// The size is the number of threads in the pool.
-    ///
-    /// The `new()` function will panic if the size is zero.
     pub fn new(size: usize) -> ThreadPool {
-        assert!(size > 0);
-
-        let (sender, receiver) = mpsc::channel();
-        let receiver = Arc::new(Mutex::new(receiver));
-
-        let mut workers = Vec::with_capacity(size);
-
-        for id in 0..size {
-            workers[id] = Worker::new(id, Arc::clone(&receiver));
-        }
-
-        ThreadPool {
-            size,
-            workers,
-            sender,
-        }
+        ThreadPool::build(size).expect("ThreadPool size must be greater than zero")
     }
 
-    /// Create a new ThreadPool.
-    /// The size is the number of threads in the pool.
-    ///
-    /// returns a Result to be `.unwrap()`ed.
     /// The `build()` function will return a PoolCreationError if size is zero.
     pub fn build(size: usize) -> Result<ThreadPool, PoolCreationError> {
         if size > 0 {
@@ -58,23 +28,40 @@ impl ThreadPool {
             Ok(ThreadPool {
                 size,
                 workers,
-                sender,
+                sender: Some(sender),
             })
         } else {
             Err(PoolCreationError)
         }
     }
 
-    pub fn execute<F>(&mut self, f: F)
+    pub fn execute<F>(&self, f: F) -> Result<(), PoolExecutionError>
     where
         F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f);
-        self.sender.send(job).unwrap();
+
+        let sender = match &self.sender {
+            Some(sender) => sender,
+            None => return Err(PoolExecutionError),
+        };
+
+        sender.send(job).map_err(|_| PoolExecutionError)
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+
+        for worker in self.workers.drain(..) {
+            worker.thread.join().unwrap();
+        }
     }
 }
 
 struct Worker {
+    id: usize,
     thread: thread::JoinHandle<()>,
 }
 
@@ -84,14 +71,70 @@ impl Worker {
         let thread = builder
             .spawn(move || {
                 loop {
-                    let job = receiver.lock().unwrap().recv().unwrap();
+                    let message = receiver.lock().unwrap().recv();
 
-                    println!("Worker {id} got a job; executing.");
-
-                    job();
+                    match message {
+                        Ok(job) => {
+                            println!("Worker {id} got a job; executing.");
+                            job();
+                        }
+                        Err(_) => {
+                            println!("Worker{id} is shutting down.");
+                            break;
+                        }
+                    }
                 }
             })
             .unwrap();
-        Worker { thread }
+        Worker { id, thread }
     }
+}
+
+// -------------------------------------------------------
+// Error Handling Types
+// -------------------------------------------------------
+
+#[derive(Debug)]
+pub struct PoolCreationError;
+#[derive(Debug)]
+pub struct PoolExecutionError;
+#[derive(Debug)]
+pub struct NoRequestError;
+
+impl From<std::io::Error> for ServerError {
+    fn from(error: std::io::Error) -> Self {
+        ServerError::Io(error)
+    }
+}
+
+impl From<PoolCreationError> for ServerError {
+    fn from(error: PoolCreationError) -> Self {
+        ServerError::PoolCreation(error)
+    }
+}
+
+impl From<PoolExecutionError> for ServerError {
+    fn from(error: PoolExecutionError) -> Self {
+        ServerError::PoolExecution(error)
+    }
+}
+
+impl From<NoRequestError> for ServerError {
+    fn from(error: NoRequestError) -> Self {
+        ServerError::NoRequest(error)
+    }
+}
+
+pub struct ThreadPool {
+    pub size: usize,
+    workers: Vec<Worker>,
+    sender: Option<mpsc::Sender<Job>>,
+}
+
+#[derive(Debug)]
+pub enum ServerError {
+    Io(std::io::Error),
+    PoolCreation(PoolCreationError),
+    PoolExecution(PoolExecutionError),
+    NoRequest(NoRequestError),
 }
